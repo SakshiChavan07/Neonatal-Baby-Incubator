@@ -1,55 +1,95 @@
+# app.py
 import pandas as pd
 import numpy as np
-#import matplotlib.pyplot as plt
-#from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression
 import streamlit as st
 
-st.line_chart(df.set_index("timestamp")[["temperature","humidity","heart_rate","weight"]])
+st.set_page_config(page_title="🍼 Neonatal Incubator Dashboard", layout="wide")
 
-#import matplotlib.pyplot as plt
-#fig, ax = plt.subplots()
-#ax.plot(df['timestamp'], df['temperature'], label="Temperature")
-#ax.plot(df['timestamp'], df['heart_rate'], label="Heart Rate")
-#ax.legend()
-#st.pyplot(fig)   # <-- This is the key for Streamlit
-#pandas
-#numpy
-#scikit-learn
-#matplotlib
-#streamlit
+# ------------------ Load Data ------------------
+@st.cache_data
+def load_data():
+    df = pd.read_csv("neonatal_incubator_data_15min.csv")
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df = df.dropna(subset=['timestamp'])
+    df = df.sort_values('timestamp')
+    df['time_idx'] = np.arange(len(df))
+    return df
 
-# Load dataset from local file
-df = pd.read_csv("neonatal_incubator_data_15min.csv", parse_dates=["timestamp"])
-df = df.sort_values("timestamp")
-df["time_idx"] = np.arange(len(df))
+df = load_data()
 
-# Show data
+# ------------------ Dashboard Title ------------------
 st.title("🍼 Baby Incubator Monitoring Dashboard")
 st.write("Overview of neonatal incubator parameters and predictions.")
 
+# ------------------ Data Preview ------------------
 st.subheader("Data Preview")
-st.write(df.head())
+st.dataframe(df.tail(10))  # last 10 readings
 
-# Plot trends
-st.subheader("Parameter Trends")
-st.line_chart(df.set_index("timestamp")[["temperature","humidity","heart_rate","weight"]])
+# ------------------ Parameter Graphs ------------------
+st.subheader("📊 Parameter Trends")
 
-# Weight prediction
+# Temperature
+st.line_chart(df.set_index('timestamp')[["temperature"]])
+# Humidity
+st.line_chart(df.set_index('timestamp')[["humidity"]])
+# Heart Rate
+st.line_chart(df.set_index('timestamp')[["heart_rate"]])
+# Weight
+st.line_chart(df.set_index('timestamp')[["weight"]])
+
+# ------------------ Threshold Alerts ------------------
+TEMP_LOW, TEMP_HIGH = 36.5, 37.5
+HUM_LOW, HUM_HIGH = 50, 65
+HR_LOW, HR_HIGH = 120, 160
+
+df['temp_alert'] = ((df['temperature'] < TEMP_LOW) | (df['temperature'] > TEMP_HIGH))
+df['hum_alert'] = ((df['humidity'] < HUM_LOW) | (df['humidity'] > HUM_HIGH))
+df['hr_alert'] = ((df['heart_rate'] < HR_LOW) | (df['heart_rate'] > HR_HIGH))
+df['any_alert'] = df['temp_alert'] | df['hum_alert'] | df['hr_alert']
+
+st.subheader("⚠ Alerts")
+for idx, row in df.tail(20).iterrows():  # last 20 readings
+    if row['any_alert']:
+        st.markdown(f"<span style='color:red'>⚠ {row['timestamp']} - Temp: {row['temperature']}°C, Hum: {row['humidity']}%, HR: {row['heart_rate']} bpm</span>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<span style='color:green'>✓ {row['timestamp']} - All parameters normal</span>", unsafe_allow_html=True)
+
+# ------------------ Weight Prediction ------------------
+st.subheader("📈 Predicted Weight Trend")
 X = df[['time_idx']]
-y = df['weight']
-model = LinearRegression()
-model.fit(X, y)
+y_weight = df['weight']
+model_weight = LinearRegression()
+model_weight.fit(X, y_weight)
+
 future_idx = np.arange(len(df), len(df)+10).reshape(-1,1)
-pred_weight = model.predict(future_idx)
+pred_weight = model_weight.predict(future_idx)
 
-st.subheader("📈 Predicted Baby Weight")
-st.line_chart(pd.DataFrame({"future_idx": future_idx.flatten(), "Predicted Weight": pred_weight}).set_index("future_idx"))
+df_pred_weight = pd.DataFrame({
+    "Future Time Index": future_idx.flatten(),
+    "Predicted Weight (kg)": pred_weight
+})
+st.line_chart(df_pred_weight.set_index("Future Time Index"))
 
-# Heart rate prediction
+# ------------------ Heart Rate Prediction ------------------
+st.subheader("💓 Predicted Heart Rate Trend")
 y_hr = df['heart_rate']
 model_hr = LinearRegression()
 model_hr.fit(X, y_hr)
-future_hr = model_hr.predict(future_idx)
+pred_hr = model_hr.predict(future_idx)
 
-st.subheader("💓 Predicted Heart Rate")
-st.line_chart(pd.DataFrame({"future_idx": future_idx.flatten(), "Predicted HR": future_hr}).set_index("future_idx"))
+df_pred_hr = pd.DataFrame({
+    "Future Time Index": future_idx.flatten(),
+    "Predicted HR (bpm)": pred_hr
+})
+st.line_chart(df_pred_hr.set_index("Future Time Index"))
+
+# ------------------ Baby Progress Score ------------------
+st.subheader("📝 Baby Progress Score")
+score = 100
+alert_penalty = df['any_alert'].sum() * 2
+weight_penalty = 0
+if pred_weight[-1] < y_weight.iloc[-1]:
+    weight_penalty = 5
+final_score = max(score - alert_penalty - weight_penalty, 0)
+st.metric("Overall Progress Score", final_score)
