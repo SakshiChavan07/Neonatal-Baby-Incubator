@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 #import matplotlib.pyplot as plt
-from sklearn.linear_model import LinearRegression
+#from sklearn.linear_model import LinearRegression
 import streamlit as st
 
 st.line_chart(df.set_index("timestamp")[["temperature","humidity","heart_rate","weight"]])
