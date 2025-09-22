@@ -1,21 +1,22 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
 import streamlit as st
 
-import matplotlib.pyplot as plt
+st.line_chart(df.set_index("timestamp")[["temperature","humidity","heart_rate","weight"]])
 
-fig, ax = plt.subplots()
-ax.plot(df['timestamp'], df['temperature'], label="Temperature")
-ax.plot(df['timestamp'], df['heart_rate'], label="Heart Rate")
-ax.legend()
-st.pyplot(fig)   # <-- This is the key for Streamlit
-pandas
-numpy
-scikit-learn
-matplotlib
-streamlit
+#import matplotlib.pyplot as plt
+#fig, ax = plt.subplots()
+#ax.plot(df['timestamp'], df['temperature'], label="Temperature")
+#ax.plot(df['timestamp'], df['heart_rate'], label="Heart Rate")
+#ax.legend()
+#st.pyplot(fig)   # <-- This is the key for Streamlit
+#pandas
+#numpy
+#scikit-learn
+#matplotlib
+#streamlit
 
 # Load dataset from local file
 df = pd.read_csv("neonatal_incubator_data_15min.csv", parse_dates=["timestamp"])
