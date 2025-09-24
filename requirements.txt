@@ -1,4 +1,5 @@
 
+pip install pyserial
 
 pandas
 numpy
