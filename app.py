@@ -1,199 +1,136 @@
+# streamlit_app.py
+import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.linear_model import LinearRegression
-import streamlit as st
+from datetime import timedelta
+from numpy import polyfit, polyval
+import os
 
-st.set_page_config(page_title="🍼 Neonatal Incubator Dashboard", layout="wide")
+st.set_page_config(page_title="🍼 Neonatal Incubator Live Dashboard", layout="wide")
 
-# ------------------ Load Data ------------------
-@st.cache_data
+# ----- Settings -----
+CSV_FILE = "neonatal_live.csv"
+EXCEL_FILE = "neonatal_incubator_with_actions.xlsx"
+REFRESH_SECONDS = 60  # auto refresh period (1 minute)
+PREDICT_MINUTES = 10  # predict next N minutes
+
+TEMP_LOW, TEMP_HIGH = 36.5, 37.2
+HUM_LOW, HUM_HIGH = 50, 65
+HR_LOW, HR_HIGH = 120, 160
+
+# ----- Auto refresh (simple) -----
+st.experimental_set_query_params()  # no-op that helps with rerun behavior
+if 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = 0
+
+# Provide a manual refresh button and info about auto-refresh
+st.title("🍼 Neonatal Incubator — Live Dashboard")
+st.markdown(f"Auto-refresh every **{REFRESH_SECONDS} seconds**. (Make sure `serial_to_csv.py` is running if you want real live data.)")
+
+col1, col2 = st.columns([1,3])
+with col1:
+    if st.button("Refresh now"):
+        st.experimental_rerun()
+with col2:
+    st.write("Live source:", "CSV (serial feed)" if os.path.exists(CSV_FILE) else "Excel fallback")
+
+# ----- Load data -----
 def load_data():
-    df = pd.read_csv("neonatal_incubator_data_15min.csv")
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    df = df.dropna(subset=['timestamp'])
-    df = df.sort_values('timestamp')
-    df['time_idx'] = np.arange(len(df))
+    if os.path.exists(CSV_FILE):
+        df = pd.read_csv(CSV_FILE)
+    else:
+        # fallback to excel readings sheet
+        df = pd.read_excel(EXCEL_FILE, sheet_name='readings', engine='openpyxl')
+    # normalize columns
+    if 'timestamp' in df.columns:
+        df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    else:
+        # if CSV missing timestamp column (unlikely), create one (current time)
+        df['timestamp'] = pd.to_datetime(df.index, unit='m', origin='unix')
+    # compute actions/alerts if missing
+    for col in ['fan_status','heater_status','alarm_status']:
+        if col not in df.columns:
+            df[col] = 0
+    df = df.sort_values('timestamp').reset_index(drop=True)
     return df
 
 df = load_data()
 
-# ------------------ Dashboard Title ------------------
-st.title("🍼 Baby Incubator Monitoring Dashboard")
-st.write("Overview of neonatal incubator parameters and predictions.")
+# If no data
+if df.empty:
+    st.error("No data available. Run serial_to_csv.py (connected to your Arduino/ESP32), or upload the Excel.")
+    st.stop()
 
-# ------------------ Data Preview ------------------
-st.subheader("Data Preview")
-st.dataframe(df.tail(10))  # last 10 readings
+# Show latest row
+latest = df.iloc[-1]
+st.subheader("Latest Reading")
+st.metric("Temperature (°C)", f"{latest.temperature:.2f}")
+st.metric("Humidity (%)", f"{latest.humidity:.1f}")
+st.metric("Weight (kg)", f"{latest.weight:.3f}")
+st.metric("Heart Rate (bpm)", f"{int(latest.heart_rate)}")
 
-# ------------------ Parameter Graphs ------------------
-st.subheader("📊 Parameter Trends")
+# Show device actions
+st.subheader("Device Actions (Latest)")
+cols = st.columns(3)
+cols[0].markdown(f"**Fan**: {'🔴 ON' if int(latest.get('fan_status',0))==1 else '🟢 OFF'}")
+cols[1].markdown(f"**Heater**: {'🔴 ON' if int(latest.get('heater_status',0))==1 else '🟢 OFF'}")
+cols[2].markdown(f"**Alarm**: {'🔴 ACTIVE' if int(latest.get('alarm_status',0))==1 else '🟢 OK'}")
 
-# Temperature
-st.line_chart(df.set_index('timestamp')[["temperature"]])
-# Humidity
-st.line_chart(df.set_index('timestamp')[["humidity"]])
-# Heart Rate
-st.line_chart(df.set_index('timestamp')[["heart_rate"]])
-# Weight
-st.line_chart(df.set_index('timestamp')[["weight"]])
+# Parameter graphs (last N points for clarity)
+st.subheader("Parameter Graphs")
+to_plot = df.set_index('timestamp')[
+    ['temperature','humidity','heart_rate','weight']
+].tail(300)  # limit to last 300 minutes for speed
+st.line_chart(to_plot['temperature'].rename("Temperature (°C)").to_frame())
+st.line_chart(to_plot['humidity'].rename("Humidity (%)").to_frame())
+st.line_chart(to_plot['heart_rate'].rename("Heart Rate (bpm)").to_frame())
+st.line_chart(to_plot['weight'].rename("Weight (kg)").to_frame())
 
-# ------------------ Threshold Alerts ------------------
-TEMP_LOW, TEMP_HIGH = 36.5, 37.5
-HUM_LOW, HUM_HIGH = 50, 65
-HR_LOW, HR_HIGH = 120, 160
+# Alerts table (last 20)
+st.subheader("Recent Alerts")
+alerts = df[(df['temperature'] < TEMP_LOW) | (df['temperature'] > TEMP_HIGH) |
+            (df['humidity'] < HUM_LOW) | (df['humidity'] > HUM_HIGH) |
+            (df['heart_rate'] < HR_LOW) | (df['heart_rate'] > HR_HIGH)]
+st.dataframe(alerts[['timestamp','temperature','humidity','heart_rate']].tail(20))
 
-df['temp_alert'] = ((df['temperature'] < TEMP_LOW) | (df['temperature'] > TEMP_HIGH))
-df['hum_alert'] = ((df['humidity'] < HUM_LOW) | (df['humidity'] > HUM_HIGH))
-df['hr_alert'] = ((df['heart_rate'] < HR_LOW) | (df['heart_rate'] > HR_HIGH))
-df['any_alert'] = df['temp_alert'] | df['hum_alert'] | df['hr_alert']
+# Simple linear prediction (next PREDICT_MINUTES)
+st.subheader("Simple Forecast (next minutes)")
+# create time_idx if missing
+if 'time_idx' not in df.columns:
+    df['time_idx'] = np.arange(len(df))
+X = df['time_idx'].values
+if len(X) >= 5:
+    # weight
+    wcoef = polyfit(X, df['weight'].values, 1)
+    future_idx = np.arange(X[-1]+1, X[-1]+1+PREDICT_MINUTES)
+    pred_weight = polyval(wcoef, future_idx)
+    # hr
+    hrcoef = polyfit(X, df['heart_rate'].values, 1)
+    pred_hr = polyval(hrcoef, future_idx)
+    future_timestamps = [df['timestamp'].iloc[-1] + timedelta(minutes=i+1) for i in range(PREDICT_MINUTES)]
+    pred_df = pd.DataFrame({
+        'timestamp': future_timestamps,
+        'predicted_weight': np.round(pred_weight,3),
+        'predicted_heart_rate': np.round(pred_hr,1)
+    })
+    st.write("Predictions (next timestamps):")
+    st.dataframe(pred_df)
+    # show simple chart combining last hour + predictions
+    recent = df.set_index('timestamp')[['weight','heart_rate']].tail(60)
+    combined_weight = pd.concat([recent['weight'], pd.Series(pred_df['predicted_weight'].values, index=pred_df['timestamp'])])
+    st.line_chart(combined_weight.rename("Weight (kg)").to_frame())
+    combined_hr = pd.concat([recent['heart_rate'], pd.Series(pred_df['predicted_heart_rate'].values, index=pred_df['timestamp'])])
+    st.line_chart(combined_hr.rename("Heart Rate (bpm)").to_frame())
+else:
+    st.info("Not enough points to predict (need >=5 readings).")
 
-st.subheader("⚠ Alerts")
-for idx, row in df.tail(20).iterrows():  # last 20 readings
-    if row['any_alert']:
-        st.markdown(f"<span style='color:red'>⚠ {row['timestamp']} - Temp: {row['temperature']}°C, Hum: {row['humidity']}%, HR: {row['heart_rate']} bpm</span>", unsafe_allow_html=True)
-    else:
-        st.markdown(f"<span style='color:green'>✓ {row['timestamp']} - All parameters normal</span>", unsafe_allow_html=True)
+# Progress score (simple)
+alerts_count = alerts.shape[0]
+progress_score = max(0, 100 - alerts_count * 0.5)
+st.subheader("Overall Progress Score")
+st.metric("Progress Score (0-100)", int(progress_score))
+st.markdown("**Note:** This is a simple demo metric. Always rely on medical staff for decisions.")
 
-# ------------------ Weight Prediction ------------------
-st.subheader("📈 Predicted Weight Trend")
-X = df[['time_idx']]
-y_weight = df['weight']
-model_weight = LinearRegression()
-model_weight.fit(X, y_weight)
-
-future_idx = np.arange(len(df), len(df)+10).reshape(-1,1)
-pred_weight = model_weight.predict(future_idx)
-
-df_pred_weight = pd.DataFrame({
-    "Future Time Index": future_idx.flatten(),
-    "Predicted Weight (kg)": pred_weight
-})
-st.line_chart(df_pred_weight.set_index("Future Time Index"))
-
-# ------------------ Heart Rate Prediction ------------------
-st.subheader("💓 Predicted Heart Rate Trend")
-y_hr = df['heart_rate']
-model_hr = LinearRegression()
-model_hr.fit(X, y_hr)
-pred_hr = model_hr.predict(future_idx)
-
-df_pred_hr = pd.DataFrame({
-    "Future Time Index": future_idx.flatten(),
-    "Predicted HR (bpm)": pred_hr
-})
-st.line_chart(df_pred_hr.set_index("Future Time Index"))
-
-# ------------------ Baby Progress Score ------------------
-st.subheader("📝 Baby Progress Score")
-score = 100
-alert_penalty = df['any_alert'].sum() * 2
-weight_penalty = 0
-if pred_weight[-1] < y_weight.iloc[-1]:
-    weight_penalty = 5
-final_score = max(score - alert_penalty - weight_penalty, 0)
-st.metric("Overall Progress Score", final_score)
-
-
-"""
-import serial
-import time
-import streamlit as st
-import pandas as pd
-
-st.title("🍼 Live Baby Incubator Monitoring (Arduino)")
-
-ser = serial.Serial("COM3", 9600, timeout=1)  # Replace COM3 with your port
-
-data_log = []
-
-for i in range(10):  # 10 readings (10 minutes if delay=1min in Arduino)
-    line = ser.readline().decode().strip()
-    if line:
-        try:
-            temp, hum, hr, wt = map(float, line.split(","))
-            data_log.append([temp, hum, hr, wt])
-            
-            df = pd.DataFrame(data_log, columns=["temperature","humidity","heart_rate","weight"])
-            st.write(df.tail())
-
-            # Show live graphs
-            st.line_chart(df)
-
-        except:
-            pass
-    
-    time.sleep(60)  # wait 1 minute
-
-"""
-"""
-import streamlit as st
-import pandas as pd
-import numpy as np
-import time
-from sklearn.linear_model import LogisticRegression
-import matplotlib.pyplot as plt
-
-st.set_page_config(page_title="Baby Incubator Monitoring", layout="wide")
-
-st.title("🍼 Neonatal Baby Incubator - Live Monitoring & Prediction")
-
-# Load dataset
-df = pd.read_csv("incubator_data.csv")
-
-# Split into features and target
-X = df[['temperature', 'humidity', 'heart_rate', 'weight']]
-y = df['status']  # 0 = Safe, 1 = Risk
-
-# Train a simple logistic regression model
-model = LogisticRegression()
-model.fit(X, y)
-
-# Simulation settings
-total_time = 10  # minutes
-interval = 60    # seconds (1 min)
-max_readings = int(total_time * 60 / interval)  # 10 readings in 10 minutes
-
-# Start live simulation
-st.subheader("📡 Live Data Stream (Simulated from CSV)")
-
-placeholder = st.empty()
-
-for i in range(max_readings):
-    with placeholder.container():
-        # Take new data sample
-        sample = df.sample(1, random_state=i).reset_index(drop=True)
-        temp, hum, hr, wt = sample.iloc[0][['temperature', 'humidity', 'heart_rate', 'weight']]
-        
-        # Prediction
-        pred = model.predict(sample[['temperature', 'humidity', 'heart_rate', 'weight']])[0]
-        status = "⚠️ At Risk" if pred == 1 else "✅ Safe"
-
-        st.metric("Temperature (°C)", f"{temp:.1f}")
-        st.metric("Humidity (%)", f"{hum:.1f}")
-        st.metric("Heart Rate (bpm)", f"{hr:.0f}")
-        st.metric("Weight (kg)", f"{wt:.2f}")
-        st.write(f"**Prediction:** {status}")
-
-        # Graphs
-        fig, axs = plt.subplots(2, 2, figsize=(8, 6))
-        axs[0,0].plot(df['temperature'][:i+1]); axs[0,0].set_title("Temperature")
-        axs[0,1].plot(df['humidity'][:i+1]); axs[0,1].set_title("Humidity")
-        axs[1,0].plot(df['heart_rate'][:i+1]); axs[1,0].set_title("Heart Rate")
-        axs[1,1].plot(df['weight'][:i+1]); axs[1,1].set_title("Weight")
-        st.pyplot(fig)
-
-        st.info(f"⏳ Waiting {interval} seconds before next reading...")
-    
-    time.sleep(interval)
-
-st.success("✅ Simulation finished (10 minutes).")
-
-
-"""
-
-
-
-
-
-
-
+# Auto-refresh note & rerun
+st.write(f"App updates every {REFRESH_SECONDS} seconds. Keep this page open to see new readings.")
+st.experimental_rerun()  # Re-run the script so it will refresh (browser refresh will also work)
